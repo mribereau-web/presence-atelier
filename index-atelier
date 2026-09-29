@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>Présences - Choeur de Pierre</title>
+
+    <script src="https://unpkg.com/html5-qrcode"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #222;
+        }
+
+        h1 {
+            margin-bottom: 5px;
+        }
+
+        h2 {
+            font-size: 18px;
+            font-weight: normal;
+            margin-top: 5px;
+        }
+
+        #scannerName {
+            font-size: 18px;
+            font-weight: bold;
+            margin: 15px auto;
+        }
+
+        #reader {
+            width: 100%;
+            max-width: 450px;
+            margin: 20px auto;
+        }
+
+        button {
+            padding: 15px 25px;
+            font-size: 18px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 8px;
+        }
+
+        #start {
+            background: #218838;
+            color: white;
+        }
+
+        #stop {
+            background: #dc3545;
+            color: white;
+        }
+
+        #result {
+            margin: 20px auto;
+            padding: 20px;
+            max-width: 450px;
+            background: white;
+            border-radius: 10px;
+            font-size: 18px;
+            min-height: 50px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>CHOEUR DE PIERRE</h1>
+    <h2>Atelier de l'étrange</h2>
+
+    <div id="scannerName">Attribution du numéro...</div>
+
+    <button id="start" disabled>📷 Démarrer la caméra</button>
+    <button id="stop" disabled>Arrêter la caméra</button>
+
+    <div id="reader"></div>
+
+    <div id="result">
+        Initialisation du scanner...
+    </div>
+
+    <script>
+        const WORKER_URL =
+            "https://choeur-presence-atelier.cdp-choeurdepierre.workers.dev/";
+
+        const scanner = new Html5Qrcode("reader");
+
+        let cameraActive = false;
+        let scanEnCours = false;
+        let dernierCode = "";
+        let dernierScan = 0;
+        let identifiantAppareil = "";
+        let numeroScanner = null;
+
+        const result = document.getElementById("result");
+        const startButton = document.getElementById("start");
+        const stopButton = document.getElementById("stop");
+        const scannerName = document.getElementById("scannerName");
+
+        // Génère ou récupère un identifiant propre à ce téléphone
+        function obtenirIdentifiantAppareil() {
+            let identifiant = localStorage.getItem("identifiantScanner");
+
+            if (!identifiant) {
+                identifiant = "TEL-" +
+                    (window.crypto && crypto.randomUUID
+                        ? crypto.randomUUID()
+                        : Date.now() + "-" + Math.random().toString(36).slice(2));
+
+                localStorage.setItem("identifiantScanner", identifiant);
+            }
+
+            return identifiant;
+        }
+
+        // Demande au serveur le numéro de ce téléphone
+        async function initialiserScanner() {
+            try {
+                identifiantAppareil = obtenirIdentifiantAppareil();
+
+                const url = WORKER_URL +
+                    "?action=scanner&appareil=" +
+                    encodeURIComponent(identifiantAppareil);
+
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (!data.success) {
+                    throw new Error(data.message || "Attribution impossible");
+                }
+
+                numeroScanner = data.numero;
+                scannerName.textContent = data.scanner;
+                result.textContent = "Prêt à scanner.";
+
+                startButton.disabled = false;
+
+            } catch (error) {
+                scannerName.textContent = "Scanner non attribué";
+                result.textContent =
+                    "❌ Impossible d'attribuer un numéro. Rechargez la page.";
+            }
+        }
+
+        startButton.onclick = async function () {
+            try {
+                const cameras = await Html5Qrcode.getCameras();
+
+                if (!cameras || cameras.length === 0) {
+                    result.innerHTML = "❌ Aucune caméra détectée.";
+                    return;
+                }
+
+                const camera = cameras[cameras.length - 1];
+
+                await scanner.start(
+                    camera.id,
+                    {
+                        fps: 10,
+                        qrbox: {
+                            width: 200,
+                            height: 200
+                        }
+                    },
+                    onScanSuccess,
+                    function () {}
+                );
+
+                cameraActive = true;
+                startButton.disabled = true;
+                stopButton.disabled = false;
+
+                result.innerHTML =
+                    "📷 Caméra activée. Présentez un QR code.";
+
+            } catch (error) {
+                result.innerHTML =
+                    "❌ Impossible de démarrer la caméra : " + error;
+            }
+        };
+
+        stopButton.onclick = async function () {
+            if (cameraActive) {
+                await scanner.stop();
+                cameraActive = false;
+                startButton.disabled = false;
+                stopButton.disabled = true;
+
+                result.innerHTML = "Caméra arrêtée.";
+            }
+        };
+
+        async function onScanSuccess(decodedText) {
+            if (scanEnCours) return;
+
+            const maintenant = Date.now();
+
+            if (
+                decodedText === dernierCode &&
+                maintenant - dernierScan < 3000
+            ) {
+                return;
+            }
+
+            scanEnCours = true;
+            dernierCode = decodedText;
+            dernierScan = maintenant;
+
+            result.innerHTML = "📡 Enregistrement en cours...";
+
+            try {
+                const url = WORKER_URL +
+                    "?id=" + encodeURIComponent(decodedText) +
+                    "&appareil=" + encodeURIComponent(identifiantAppareil);
+
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (data.success) {
+                    if (data.duplicate) {
+                        result.innerHTML =
+                            "⚠️ Présence déjà enregistrée<br><br>" +
+                            "<strong>" + data.prenom + " " +
+                            data.nom + "</strong><br>" +
+                            data.voix;
+                    } else {
+                        result.innerHTML =
+                            "✅ Présence enregistrée<br><br>" +
+                            "<strong>" + data.prenom + " " +
+                            data.nom + "</strong><br>" +
+                            data.voix;
+                    }
+                } else {
+                    result.innerHTML = "❌ " + data.message;
+                }
+
+            } catch (error) {
+                result.innerHTML =
+                    "❌ Erreur de connexion au serveur.";
+            }
+
+            setTimeout(function () {
+                scanEnCours = false;
+            }, 1500);
+        }
+
+        initialiserScanner();
+    </script>
+
+</body>
+</html>
